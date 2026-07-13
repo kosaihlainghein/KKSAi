@@ -2,6 +2,20 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { supabase, SESSION_ID } from './lib/supabase';
 import { getAIResponse, getTypingDelay } from './lib/aiEngine';
 import {
+  checkComfyUI,
+  checkCaptionServer,
+  getAvailableModels,
+} from './lib/backend';
+import {
+  generateImages,
+  generateVideo,
+  uploadReferenceImage,
+  interruptGeneration,
+  GenerationParams,
+  VideoParams,
+} from './lib/comfyui';
+import { captionBatch } from './lib/caption';
+import {
   LayoutDashboard,
   Database,
   Sliders,
@@ -22,7 +36,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Zap,
   Layers,
   Settings,
   FileImage,
@@ -35,7 +48,6 @@ import {
   SwitchCamera,
   Bot,
   User,
-  RotateCcw,
   Volume2,
   VolumeX,
   Maximize2,
@@ -49,6 +61,7 @@ type Screen = 'dashboard' | 'dataset' | 'training' | 'generation' | 'assistant';
 type DatasetMode = 'image' | 'video';
 type TrainingMode = 'image' | 'video';
 type GenerationMode = 'image' | 'image-to-video';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 
 interface Project {
   id: string;
@@ -71,10 +84,10 @@ interface UploadedFile {
 }
 
 interface TrainingLog {
-  id: number;
+  id?: number;
   message: string;
   type: 'info' | 'success' | 'warning' | 'error';
-  timestamp: Date;
+  timestamp?: Date;
 }
 
 interface GeneratedContent {
@@ -144,13 +157,24 @@ function App() {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const trainingRef = useRef<number | null>(null);
   const currentJobIdRef = useRef<string | null>(null);
-  const [dbLoading, setDbLoading] = useState(true);
+  const [, setDbLoading] = useState(true);
+
+  // Backend connection state
+  const [backendStatus, setBackendStatus] = useState<{ comfyui: boolean; caption: boolean }>({ comfyui: false, caption: false });
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [selectedModel, setSelectedModel] = useState('sd1.5-pruned.ckpt');
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [genSteps, setGenSteps] = useState(25);
+  const [genCfg, setGenCfg] = useState(7.5);
+  const [videoFrames, setVideoFrames] = useState(16);
+  const referenceFileInputRef = useRef<HTMLInputElement>(null);
 
   // New state for video features
   const [datasetMode, setDatasetMode] = useState<DatasetMode>('image');
   const [trainingMode, setTrainingMode] = useState<TrainingMode>('image');
   const [generationMode, setGenerationMode] = useState<GenerationMode>('image');
   const [referenceImage, setReferenceImage] = useState<string | null>(null);
+  const [referenceImageName, setReferenceImageName] = useState<string | null>(null);
   const [videoPrompt, setVideoPrompt] = useState('');
   const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
   const [videoMuted, setVideoMuted] = useState(false);
@@ -236,6 +260,36 @@ function App() {
     setShowNotification(message);
     setTimeout(() => setShowNotification(null), 3000);
   };
+
+  // ── Backend status polling ────────────────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+
+    const checkBackend = async () => {
+      const [comfyui, caption] = await Promise.all([checkComfyUI(), checkCaptionServer()]);
+      if (!mounted) return;
+      setBackendStatus({ comfyui, caption });
+
+      if (comfyui) {
+        const models = await getAvailableModels();
+        if (mounted && models.length > 0) {
+          setAvailableModels(models);
+          if (models.includes('sd1.5-pruned.ckpt')) {
+            setSelectedModel('sd1.5-pruned.ckpt');
+          } else {
+            setSelectedModel(models[0]);
+          }
+        }
+      }
+    };
+
+    checkBackend();
+    const interval = setInterval(checkBackend, 10000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   const handleCreateProject = async () => {
     if (!newProjectName.trim()) return;
@@ -337,6 +391,28 @@ function App() {
 
   const handleAutoCaption = async () => {
     setAutoCaptioning(true);
+
+    if (backendStatus.caption) {
+      // ── Real BLIP caption server ────────────────────────────────────────
+      const filesToCaption = uploadedFiles.map(f => ({ id: f.id, preview: f.preview }));
+      const results = await captionBatch(filesToCaption, () => {
+        // Could show progress in UI
+      });
+
+      if (results.size > 0) {
+        setUploadedFiles(prev =>
+          prev.map(file => {
+            const result = results.get(file.id);
+            return result ? { ...file, caption: result.caption } : file;
+          })
+        );
+        setAutoCaptioning(false);
+        showNotificationWithTimeout(`AI captions generated for ${results.size} files (BLIP model)!`);
+        return;
+      }
+    }
+
+    // ── Mock fallback ─────────────────────────────────────────────────────
     await new Promise(resolve => setTimeout(resolve, 2500));
     const captions = datasetMode === 'image' ? [
       'a modern living room with minimal furniture, natural lighting, 8k resolution, photorealistic',
@@ -358,7 +434,7 @@ function App() {
       }))
     );
     setAutoCaptioning(false);
-    showNotificationWithTimeout('AI captions generated for all files!');
+    showNotificationWithTimeout('AI captions generated (demo mode — start caption server for real BLIP captions)');
   };
 
   const handleExportDataset = () => {
@@ -482,7 +558,7 @@ function App() {
               logs: accumulatedLogs.map(l => ({
                 message: l.message,
                 type: l.type,
-                timestamp: l.timestamp.toISOString(),
+                timestamp: l.timestamp?.toISOString(),
               })),
             })
             .eq('id', currentJobIdRef.current);
@@ -521,18 +597,88 @@ function App() {
   const handleGenerate = async () => {
     if (!generationPrompt.trim()) return;
     setIsGenerating(true);
+    setGenerationProgress(0);
+
+    const isVideo = generationMode === 'image-to-video';
+
+    // ── Real backend path (ComfyUI online) ────────────────────────────────
+    if (backendStatus.comfyui) {
+      try {
+        const seed = Math.floor(Math.random() * 999999999);
+
+        if (!isVideo) {
+          const params: GenerationParams = {
+            prompt: generationPrompt,
+            negativePrompt: negativePrompt || 'blurry, low quality, distorted, bad anatomy, watermark, text',
+            seed,
+            steps: genSteps,
+            cfgScale: genCfg,
+            width: 512,
+            height: 512,
+            modelName: selectedModel,
+            batchSize: 4,
+          };
+          const result = await generateImages(params, (pct) => setGenerationProgress(pct));
+          if (result && result.images.length > 0) {
+            const newContent: GeneratedContent[] = result.images.map((url, i) => ({
+              id: Date.now().toString() + i,
+              prompt: generationPrompt,
+              seed: seed + i,
+              preview: url,
+              type: 'image' as const,
+            }));
+            setGeneratedContent(prev => [...newContent, ...prev]);
+            setIsGenerating(false);
+            setGenerationProgress(0);
+            showNotificationWithTimeout(`${result.images.length} images generated via ComfyUI!`);
+            return;
+          }
+        } else {
+          // Video generation via AnimateDiff
+          const params: VideoParams = {
+            prompt: videoPrompt || generationPrompt,
+            negativePrompt: negativePrompt || 'blurry, low quality, distorted, watermark',
+            seed,
+            steps: genSteps,
+            cfgScale: genCfg,
+            modelName: selectedModel,
+            referenceImageName: referenceImageName,
+            frames: videoFrames,
+            motionScale: 1.0,
+          };
+          const result = await generateVideo(params, (pct) => setGenerationProgress(pct));
+          if (result && result.videoUrl) {
+            const newContent: GeneratedContent[] = [{
+              id: Date.now().toString(),
+              prompt: videoPrompt || generationPrompt,
+              seed,
+              preview: result.videoUrl,
+              type: 'video' as const,
+            }];
+            setGeneratedContent(prev => [...newContent, ...prev]);
+            setIsGenerating(false);
+            setGenerationProgress(0);
+            showNotificationWithTimeout('Video generated via ComfyUI AnimateDiff!');
+            return;
+          }
+        }
+
+        // If we reach here, generation failed
+        setIsGenerating(false);
+        setGenerationProgress(0);
+        showNotificationWithTimeout('Generation failed — check ComfyUI console for errors');
+        return;
+      } catch (err) {
+        setIsGenerating(false);
+        setGenerationProgress(0);
+        showNotificationWithTimeout('Generation error — falling back to demo mode');
+      }
+    }
+
+    // ── Mock fallback (no backend) ────────────────────────────────────────
     await new Promise(resolve => setTimeout(resolve, 3500));
 
-    if (generationMode === 'image') {
-      const newContent: GeneratedContent[] = Array.from({ length: 4 }, (_, i) => ({
-        id: Date.now().toString() + i,
-        prompt: generationPrompt,
-        seed: Math.floor(Math.random() * 999999999),
-        preview: generatedSampleImages[i % generatedSampleImages.length],
-        type: 'image' as const,
-      }));
-      setGeneratedContent(prev => [...newContent, ...prev]);
-    } else {
+    if (isVideo) {
       const newContent: GeneratedContent[] = Array.from({ length: 2 }, (_, i) => ({
         id: Date.now().toString() + i,
         prompt: videoPrompt,
@@ -541,14 +687,51 @@ function App() {
         type: 'video' as const,
       }));
       setGeneratedContent(prev => [...newContent, ...prev]);
+    } else {
+      const newContent: GeneratedContent[] = Array.from({ length: 4 }, (_, i) => ({
+        id: Date.now().toString() + i,
+        prompt: generationPrompt,
+        seed: Math.floor(Math.random() * 999999999),
+        preview: generatedSampleImages[i % generatedSampleImages.length],
+        type: 'image' as const,
+      }));
+      setGeneratedContent(prev => [...newContent, ...prev]);
     }
     setIsGenerating(false);
-    showNotificationWithTimeout(`${generationMode === 'image' ? '4 images' : '2 videos'} generated successfully!`);
+    setGenerationProgress(0);
+    showNotificationWithTimeout(`${isVideo ? '2 videos' : '4 images'} generated (demo mode - start local backend for real AI)`);
   };
 
-  const handleReferenceUpload = () => {
-    setReferenceImage(generatedSampleImages[Math.floor(Math.random() * generatedSampleImages.length)]);
-    showNotificationWithTimeout('Reference image uploaded!');
+  const handleStopGeneration = async () => {
+    if (backendStatus.comfyui) {
+      await interruptGeneration();
+    }
+    setIsGenerating(false);
+    setGenerationProgress(0);
+    showNotificationWithTimeout('Generation stopped');
+  };
+
+  const handleReferenceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Show preview immediately
+    const reader = new FileReader();
+    reader.onload = (ev) => setReferenceImage(ev.target?.result as string);
+    reader.readAsDataURL(file);
+
+    // Upload to ComfyUI if available
+    if (backendStatus.comfyui) {
+      const uploadedName = await uploadReferenceImage(file);
+      if (uploadedName) {
+        setReferenceImageName(uploadedName);
+        showNotificationWithTimeout('Reference image uploaded to ComfyUI!');
+      } else {
+        showNotificationWithTimeout('Reference image loaded (ComfyUI upload failed)');
+      }
+    } else {
+      showNotificationWithTimeout('Reference image loaded (demo mode)');
+    }
   };
 
   const handleSendMessage = async (overrideText?: string) => {
@@ -685,17 +868,34 @@ function App() {
             </div>
           </a>
 
-          {/* GPU Status */}
+          {/* Backend Status */}
           <div className="p-3 bg-[#1f1500] rounded-lg">
             <div className="flex items-center gap-2 mb-2">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-xs text-green-400 font-medium">GPU Ready</span>
+              <div className={`w-2 h-2 rounded-full animate-pulse ${backendStatus.comfyui ? 'bg-green-500' : 'bg-red-500'}`} />
+              <span className={`text-xs font-medium ${backendStatus.comfyui ? 'text-green-400' : 'text-red-400'}`}>
+                {backendStatus.comfyui ? 'ComfyUI Online' : 'ComfyUI Offline'}
+              </span>
             </div>
-            <p className="text-xs text-[#8a6030]">RTX 4090 - 24GB</p>
-            <div className="mt-2 h-1.5 bg-[#3d2a00] rounded-full overflow-hidden">
-              <div className="h-full w-3/5 bg-gradient-to-r from-amber-500 to-green-500 rounded-full" />
+            <p className="text-xs text-[#8a6030]">
+              {backendStatus.comfyui ? selectedModel : 'Demo mode — run setup.bat'}
+            </p>
+            <div className="mt-2 flex items-center gap-1.5">
+              <div className={`w-2 h-2 rounded-full ${backendStatus.caption ? 'bg-green-500' : 'bg-red-500'}`} />
+              <span className={`text-[10px] ${backendStatus.caption ? 'text-green-400' : 'text-red-400'}`}>
+                Caption {backendStatus.caption ? 'Online' : 'Offline'}
+              </span>
             </div>
-            <p className="text-xs text-[#8a6030] mt-1">VRAM: 14.4GB / 24GB</p>
+            {backendStatus.comfyui && availableModels.length > 1 && (
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="mt-2 w-full text-xs bg-[#0d0800] border border-[#3d2a00] rounded px-2 py-1 text-amber-400 outline-none focus:border-amber-600"
+              >
+                {availableModels.map(m => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            )}
           </div>
         </div>
       </aside>
@@ -759,7 +959,7 @@ function App() {
                       />
                       {project.isVideo && (
                         <div className="absolute top-3 left-3">
-                          <span className="px-2 py-1 bg-purple-500/20 text-purple-400 text-xs font-medium rounded-md flex items-center gap-1">
+                          <span className="px-2 py-1 bg-amber-500/20 text-amber-400 text-xs font-medium rounded-md flex items-center gap-1">
                             <Video className="w-3 h-3" /> Video
                           </span>
                         </div>
@@ -827,7 +1027,7 @@ function App() {
                   onClick={() => setDatasetMode('video')}
                   className={`flex items-center gap-2 px-4 py-2 rounded-md transition-all ${
                     datasetMode === 'video'
-                      ? 'bg-purple-500 text-white'
+                      ? 'bg-amber-600 text-white'
                       : 'text-[#c4a060] hover:text-white hover:bg-[#1f1500]'
                   }`}
                 >
@@ -863,7 +1063,7 @@ function App() {
                   </>
                 ) : (
                   <>
-                    <Film className={`w-12 h-12 mx-auto mb-4 ${isDragging ? 'text-purple-400' : 'text-[#6a4820]'}`} />
+                    <Film className={`w-12 h-12 mx-auto mb-4 ${isDragging ? 'text-amber-400' : 'text-[#6a4820]'}`} />
                     <h3 className="text-lg font-semibold text-white mb-2">
                       {isDragging ? 'Drop videos here' : 'Upload Video Clips'}
                     </h3>
@@ -894,7 +1094,7 @@ function App() {
                     <button
                       onClick={handleAutoCaption}
                       disabled={autoCaptioning}
-                      className="flex items-center gap-2 px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded-lg transition-colors disabled:opacity-50"
+                      className="flex items-center gap-2 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 rounded-lg transition-colors disabled:opacity-50"
                     >
                       {autoCaptioning ? (
                         <Loader2 className="w-4 h-4 animate-spin" />
@@ -960,7 +1160,7 @@ function App() {
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-xs text-[#6a4820] font-mono truncate">{file.name}</span>
                           {file.duration && (
-                            <span className="text-xs text-purple-400 flex items-center gap-1">
+                            <span className="text-xs text-amber-400 flex items-center gap-1">
                               <Timer className="w-3 h-3" />
                               {file.duration}
                             </span>
@@ -1011,7 +1211,7 @@ function App() {
                   onClick={() => setTrainingMode('video')}
                   className={`flex items-center gap-2 px-4 py-2 rounded-md transition-all ${
                     trainingMode === 'video'
-                      ? 'bg-purple-500 text-white'
+                      ? 'bg-amber-600 text-white'
                       : 'text-[#c4a060] hover:text-white hover:bg-[#1f1500]'
                   }`}
                 >
@@ -1156,7 +1356,7 @@ function App() {
                         className={`w-full flex items-center justify-center gap-2 px-6 py-3 text-white font-semibold rounded-lg transition-all duration-200 animate-pulse-glow ${
                           trainingMode === 'image'
                             ? 'bg-gradient-to-r from-amber-600 to-red-700 hover:from-amber-700 hover:to-red-800'
-                            : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600'
+                            : 'bg-gradient-to-r from-amber-600 to-red-700 hover:from-amber-700 hover:to-red-800'
                         }`}
                       >
                         <Play className="w-5 h-5" />
@@ -1177,7 +1377,7 @@ function App() {
                 {/* Training Progress & Logs */}
                 <div className="bg-[#160e00] border border-[#3d2a00] rounded-xl p-6 flex flex-col">
                   <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2">
-                    <Terminal className={`w-5 h-5 ${trainingMode === 'image' ? 'text-amber-400' : 'text-purple-400'}`} />
+                    <Terminal className={`w-5 h-5 ${trainingMode === 'image' ? 'text-amber-400' : 'text-amber-400'}`} />
                     Training Console
                   </h3>
 
@@ -1190,7 +1390,7 @@ function App() {
                     <div className="h-3 bg-[#1f1500] rounded-full overflow-hidden">
                       <div
                         className={`h-full rounded-full transition-all duration-300 ${
-                          isTraining ? 'progress-bar' : trainingMode === 'image' ? 'bg-gradient-to-r from-amber-600 to-red-700' : 'bg-gradient-to-r from-purple-500 to-pink-500'
+                          isTraining ? 'progress-bar' : trainingMode === 'image' ? 'bg-gradient-to-r from-amber-600 to-red-700' : 'bg-gradient-to-r from-amber-600 to-red-700'
                         }`}
                         style={{ width: `${trainingProgress}%` }}
                       />
@@ -1269,7 +1469,7 @@ function App() {
                   onClick={() => setGenerationMode('image-to-video')}
                   className={`flex items-center gap-2 px-4 py-2 rounded-md transition-all ${
                     generationMode === 'image-to-video'
-                      ? 'bg-purple-500 text-white'
+                      ? 'bg-amber-600 text-white'
                       : 'text-[#c4a060] hover:text-white hover:bg-[#1f1500]'
                   }`}
                 >
@@ -1282,7 +1482,7 @@ function App() {
               {generationMode === 'image-to-video' && (
                 <div className="bg-[#160e00] border border-[#3d2a00] rounded-xl p-6">
                   <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                    <Upload className="w-5 h-5 text-purple-400" />
+                    <Upload className="w-5 h-5 text-amber-400" />
                     Reference Image
                   </h3>
                   {referenceImage ? (
@@ -1304,11 +1504,11 @@ function App() {
                     </div>
                   ) : (
                     <div
-                      onClick={handleReferenceUpload}
-                      className="border-2 border-dashed border-[#3d2a00] hover:border-purple-500/50 rounded-xl p-8 text-center cursor-pointer transition-colors"
+                      onClick={() => referenceFileInputRef.current?.click()}
+                      className="border-2 border-dashed border-[#3d2a00] hover:border-[#d97706]/50 rounded-xl p-8 text-center cursor-pointer transition-colors"
                     >
-                      <div className="w-16 h-16 rounded-full bg-purple-500/20 flex items-center justify-center mx-auto mb-4">
-                        <ImageIcon className="w-8 h-8 text-purple-400" />
+                      <div className="w-16 h-16 rounded-full bg-[#d97706]/20 flex items-center justify-center mx-auto mb-4">
+                        <ImageIcon className="w-8 h-8 text-[#d97706]" />
                       </div>
                       <p className="text-[#c4a060] mb-2">Click to upload reference image</p>
                       <p className="text-xs text-[#6a4820]">This image will be animated based on your prompt</p>
@@ -1316,6 +1516,15 @@ function App() {
                   )}
                 </div>
               )}
+
+              {/* Hidden file input for reference image */}
+              <input
+                ref={referenceFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleReferenceUpload}
+              />
 
               {/* Input Area */}
               <div className="bg-[#160e00] border border-[#3d2a00] rounded-xl p-6">
@@ -1354,19 +1563,16 @@ function App() {
                 <div className="flex items-center gap-4 mt-4 flex-wrap">
                   <div className="flex items-center gap-2">
                     <Layers className="w-4 h-4 text-[#8a6030]" />
-                    <select className="bg-[#1f1500] border border-[#3d2a00] rounded-lg px-3 py-2 text-sm text-[#c4a060] focus:outline-none focus:border-amber-500 transition-colors">
-                      {generationMode === 'image' ? (
-                        <>
-                          <option>Anime Style v1</option>
-                          <option>Interior Modern</option>
-                          <option>Portrait Studio</option>
-                        </>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.target.value)}
+                      className="bg-[#1f1500] border border-[#3d2a00] rounded-lg px-3 py-2 text-sm text-[#c4a060] focus:outline-none focus:border-amber-500 transition-colors"
+                      disabled={!backendStatus.comfyui}
+                    >
+                      {backendStatus.comfyui && availableModels.length > 0 ? (
+                        availableModels.map(m => <option key={m} value={m}>{m}</option>)
                       ) : (
-                        <>
-                          <option>Motion Effects Pack</option>
-                          <option>AnimateDiff Default</option>
-                          <option>Custom Motion LoRA</option>
-                        </>
+                        <option>Demo Mode (start backend)</option>
                       )}
                     </select>
                   </div>
@@ -1375,7 +1581,10 @@ function App() {
                     <span className="text-xs text-[#6a4820]">Steps:</span>
                     <input
                       type="number"
-                      defaultValue={generationMode === 'image' ? 30 : 25}
+                      value={genSteps}
+                      onChange={(e) => setGenSteps(parseInt(e.target.value) || 25)}
+                      min={10}
+                      max={50}
                       className="w-16 bg-[#1f1500] border border-[#3d2a00] rounded-lg px-2 py-1 text-sm text-[#c4a060] text-center focus:outline-none focus:border-amber-500 transition-colors"
                     />
                   </div>
@@ -1384,19 +1593,26 @@ function App() {
                     <span className="text-xs text-[#6a4820]">CFG Scale:</span>
                     <input
                       type="number"
-                      defaultValue={7}
+                      value={genCfg}
+                      onChange={(e) => setGenCfg(parseFloat(e.target.value) || 7.5)}
+                      min={1}
+                      max={20}
+                      step={0.5}
                       className="w-16 bg-[#1f1500] border border-[#3d2a00] rounded-lg px-2 py-1 text-sm text-[#c4a060] text-center focus:outline-none focus:border-amber-500 transition-colors"
                     />
                   </div>
 
                   {generationMode === 'image-to-video' && (
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-[#6a4820]">Duration:</span>
-                      <select className="bg-[#1f1500] border border-[#3d2a00] rounded-lg px-2 py-1 text-sm text-[#c4a060] focus:outline-none focus:border-amber-500 transition-colors">
-                        <option>2 seconds</option>
-                        <option>4 seconds</option>
-                        <option>8 seconds</option>
-                      </select>
+                      <span className="text-xs text-[#6a4820]">Frames:</span>
+                      <input
+                        type="number"
+                        value={videoFrames}
+                        onChange={(e) => setVideoFrames(parseInt(e.target.value) || 16)}
+                        min={8}
+                        max={32}
+                        className="w-16 bg-[#1f1500] border border-[#3d2a00] rounded-lg px-2 py-1 text-sm text-[#c4a060] text-center focus:outline-none focus:border-amber-500 transition-colors"
+                      />
                     </div>
                   )}
 
@@ -1410,19 +1626,28 @@ function App() {
                     >
                       <RefreshCw className="w-4 h-4 text-[#8a6030]" />
                     </button>
+                    {isGenerating && backendStatus.comfyui && (
+                      <button
+                        onClick={handleStopGeneration}
+                        className="flex items-center gap-2 px-4 py-2.5 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-lg transition-all"
+                      >
+                        <Square className="w-4 h-4" />
+                        Stop
+                      </button>
+                    )}
                     <button
                       onClick={handleGenerate}
-                      disabled={isGenerating || (generationMode === 'image' ? !generationPrompt.trim() : (!videoPrompt.trim() || !referenceImage))}
+                      disabled={isGenerating || (generationMode === 'image' ? !generationPrompt.trim() : (!videoPrompt.trim()))}
                       className={`flex items-center gap-2 px-6 py-2.5 text-white font-semibold rounded-lg transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed ${
                         generationMode === 'image'
                           ? 'bg-gradient-to-r from-amber-600 to-red-700 hover:from-amber-700 hover:to-red-800'
-                          : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600'
+                          : 'bg-gradient-to-r from-amber-600 to-red-700 hover:from-amber-700 hover:to-red-800'
                       }`}
                     >
                       {isGenerating ? (
                         <>
                           <Loader2 className="w-5 h-5 animate-spin" />
-                          Generating...
+                          {generationProgress > 0 ? `${generationProgress}%` : 'Generating...'}
                         </>
                       ) : (
                         <>
@@ -1433,6 +1658,18 @@ function App() {
                     </button>
                   </div>
                 </div>
+
+                {/* Progress bar for real generation */}
+                {isGenerating && generationProgress > 0 && (
+                  <div className="mt-4">
+                    <div className="h-2 bg-[#3d2a00] rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-amber-500 to-amber-600 rounded-full transition-all duration-500"
+                        style={{ width: `${generationProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Loading Skeleton */}
@@ -1491,7 +1728,7 @@ function App() {
                           {content.type === 'video' && playingVideoId === content.id && (
                             <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#3d2a00]">
                               <div
-                                className="h-full bg-purple-500 rounded-full animate-pulse"
+                                className="h-full bg-amber-500 rounded-full animate-pulse"
                                 style={{ width: '60%' }}
                               />
                             </div>
@@ -1677,7 +1914,7 @@ function App() {
                     className="flex-1 bg-[#1f1500] border border-[#3d2a00] rounded-xl px-4 py-3 text-white placeholder:text-[#6a4820] focus:outline-none focus:border-amber-500 transition-colors"
                   />
                   <button
-                    onClick={handleSendMessage}
+                    onClick={() => handleSendMessage()}
                     disabled={!chatInput.trim() || isTyping}
                     className="px-4 py-3 bg-amber-600 hover:bg-amber-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
@@ -1763,7 +2000,7 @@ function App() {
                           className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                             newProjectType === type
                               ? type.includes('Video')
-                                ? 'bg-purple-500/20 text-purple-400 border-purple-500'
+                                ? 'bg-amber-500/20 text-amber-400 border-amber-500'
                                 : 'bg-amber-500/20 text-amber-400 border-amber-500'
                               : 'bg-[#1f1500] text-[#c4a060] border-[#3d2a00] hover:border-[#5a3c00]'
                           } border`}
@@ -1788,7 +2025,7 @@ function App() {
               {newProjectStep === 2 && (
                 <div className="space-y-4">
                   <p className="text-sm text-[#c4a060] mb-4">
-                    Project "<span className="text-white font-medium">{newProjectName}</span>" will be created as a <span className={newProjectType.includes('Video') ? 'text-purple-400' : 'text-amber-400'}>{newProjectType}</span> project.
+                    Project "<span className="text-white font-medium">{newProjectName}</span>" will be created as a <span className={newProjectType.includes('Video') ? 'text-amber-400' : 'text-amber-400'}>{newProjectType}</span> project.
                   </p>
 
                   <div className="bg-[#1f1500] border border-[#3d2a00] rounded-lg p-4 space-y-2">
@@ -1819,7 +2056,7 @@ function App() {
                       onClick={handleCreateProject}
                       className={`flex-1 px-6 py-3 text-white font-semibold rounded-lg transition-colors ${
                         newProjectType.includes('Video')
-                          ? 'bg-purple-500 hover:bg-purple-600'
+                          ? 'bg-amber-600 hover:bg-amber-700'
                           : 'bg-amber-600 hover:bg-amber-700'
                       }`}
                     >
