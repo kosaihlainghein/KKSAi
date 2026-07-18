@@ -4,14 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        primary: '#0a0a0f',
-        secondary: '#12121a',
-        tertiary: '#1a1a24',
-        border: '#2a2a38',
-      },
-      fontFamily: {
-        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace'],
+        kks: {
+          bg: '#0d0800',
+          panel: '#1a1100',
+          border: '#3d2a00',
+          accent: '#d97706',
+          accent2: '#f59e0b',
+          text: '#c4a060',
+          muted: '#8a6030',
+          dim: '#6a4820',
+        },
       },
     },
   },

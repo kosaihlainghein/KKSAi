@@ -49,6 +49,30 @@ export interface DbDatasetFile {
   created_at: string;
 }
 
+export interface DbTrainingMetric {
+  id: string;
+  job_id: string;
+  step: number;
+  epoch: number;
+  loss: number;
+  learning_rate: number;
+  val_loss: number | null;
+  created_at: string;
+}
+
+export interface DbModelCheckpoint {
+  id: string;
+  job_id: string;
+  step: number;
+  filename: string;
+  file_path: string;
+  loss: number;
+  is_best: boolean;
+  is_final: boolean;
+  file_size_mb: number | null;
+  created_at: string;
+}
+
 // Stable session ID for this browser session
 export const SESSION_ID = (() => {
   const key = 'kks_chat_session';
