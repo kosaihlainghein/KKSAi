@@ -1,11 +1,6 @@
-// BLIP caption server client — talks to local Python caption server (port 8189).
-
 import { CAPTION_SERVER_URL } from './backend';
 
-export interface CaptionResult {
-  caption: string;
-  confidence: number;
-}
+export interface CaptionResult { caption: string; confidence: number; }
 
 export async function captionImage(file: File | Blob): Promise<CaptionResult | null> {
   try {
@@ -15,9 +10,7 @@ export async function captionImage(file: File | Blob): Promise<CaptionResult | n
     if (!res.ok) return null;
     const data = await res.json();
     return { caption: data.caption, confidence: data.confidence ?? 0 };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 export async function captionImageByPreview(previewUrl: string): Promise<CaptionResult | null> {
@@ -25,9 +18,7 @@ export async function captionImageByPreview(previewUrl: string): Promise<Caption
     const res = await fetch(previewUrl);
     const blob = await res.blob();
     return captionImage(blob);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 export async function captionBatch(
@@ -35,12 +26,10 @@ export async function captionBatch(
   onProgress?: (done: number, total: number) => void
 ): Promise<Map<string, CaptionResult>> {
   const results = new Map<string, CaptionResult>();
-  const total = files.length;
   for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const result = await captionImageByPreview(file.preview);
-    if (result) results.set(file.id, result);
-    onProgress?.(i + 1, total);
+    const result = await captionImageByPreview(files[i].preview);
+    if (result) results.set(files[i].id, result);
+    onProgress?.(i + 1, files.length);
   }
   return results;
 }

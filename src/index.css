@@ -2,36 +2,36 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
-}
+:root { color-scheme: dark; }
 
 body {
   margin: 0;
-  background: #0d0800;
-  color: #c4a060;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: #0a0700;
+  color: #e8d5b0;
+  font-family: 'Noto Sans Myanmar', 'Inter', system-ui, sans-serif;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #15100a; }
+::-webkit-scrollbar-thumb { background: #3d2e1a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #d97706; }
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
 }
-::-webkit-scrollbar-track {
-  background: #1a1100;
-}
-::-webkit-scrollbar-thumb {
-  background: #3d2a00;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #d97706;
+.shimmer {
+  background: linear-gradient(90deg, transparent, rgba(217,119,6,0.15), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
 }
 
-@keyframes progress-bar {
-  0% { width: 0%; }
-  100% { width: 100%; }
+@keyframes progress-stripe {
+  0% { background-position: 0 0; }
+  100% { background-position: 40px 0; }
 }
-.progress-bar {
-  animation: progress-bar 2s ease-in-out infinite;
+.progress-stripe {
+  background-image: linear-gradient(45deg, rgba(255,255,255,0.1) 25%, transparent 25%, transparent 50%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.1) 75%, transparent 75%, transparent);
+  background-size: 40px 40px;
+  animation: progress-stripe 1s linear infinite;
 }

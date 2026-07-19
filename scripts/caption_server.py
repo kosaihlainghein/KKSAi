@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-KKS AI Smart Trainer — BLIP Auto-Caption Server
+KKS AI Design Studio - BLIP Auto-Caption Server
 Runs on http://127.0.0.1:8189
 Uses Salesforce BLIP model to generate captions for uploaded images.
 """
@@ -31,7 +31,7 @@ def load_model():
             "Salesforce/blip-image-captioning-base"
         ).to(_device)
         _model.eval()
-        print("[caption] BLIP model loaded.")
+        print("[caption] BLIP model loaded successfully.")
     except ImportError as e:
         print(f"[caption] ERROR: {e}")
         print("[caption] Run: pip install torch torchvision transformers pillow")
@@ -57,29 +57,40 @@ class CaptionHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def do_OPTIONS(self):
-        self.send_response(200); self._cors(); self.end_headers()
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
 
     def do_GET(self):
         if urlparse(self.path).path == "/health":
-            self.send_response(200); self._cors()
-            self.send_header("Content-Type", "application/json"); self.end_headers()
-            self.wfile.write(json.dumps({"status":"ok","device":_device,"loaded":_model is not None}).encode())
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "device": _device, "loaded": _model is not None}).encode())
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         if urlparse(self.path).path != "/caption":
-            self.send_response(404); self.end_headers(); return
+            self.send_response(404)
+            self.end_headers()
+            return
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         ct = self.headers.get("Content-Type", "")
         try:
             img = self._extract(body, ct)
             if img is None:
-                self._err(400, "No image"); return
-            if _model is None: load_model()
+                self._err(400, "No image found")
+                return
+            if _model is None:
+                load_model()
             cap = generate_caption(img)
-            self.send_response(200); self._cors()
-            self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
             self.wfile.write(json.dumps({"caption": cap, "confidence": 0.85}).encode())
         except Exception as e:
             self._err(500, str(e))
@@ -89,30 +100,37 @@ class CaptionHandler(BaseHTTPRequestHandler):
             boundary = None
             for p in ct.split(";"):
                 p = p.strip()
-                if p.startswith("boundary="): boundary = p[9:]; break
-            if not boundary: return None
-            parts = body.split(("--"+boundary).encode())
+                if p.startswith("boundary="):
+                    boundary = p[9:]
+                    break
+            if not boundary:
+                return None
+            parts = body.split(("--" + boundary).encode())
             for p in parts:
                 if b"filename=" in p:
                     h = p.find(b"\r\n\r\n")
                     if h != -1:
                         d = p[h+4:]
-                        if d.endswith(b"\r\n"): d = d[:-2]
+                        if d.endswith(b"\r\n"):
+                            d = d[:-2]
                         return d
             return None
         return body
 
     def _err(self, code, msg):
-        self.send_response(code); self._cors()
-        self.send_header("Content-Type", "application/json"); self.end_headers()
+        self.send_response(code)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
         self.wfile.write(json.dumps({"error": msg}).encode())
 
-    def log_message(self, *a): pass
+    def log_message(self, *args):
+        pass
 
 if __name__ == "__main__":
-    print("="*60)
-    print("  KKS AI Smart Trainer — BLIP Caption Server")
+    print("=" * 60)
+    print("  KKS AI Design Studio - BLIP Caption Server")
     print("  http://127.0.0.1:8189")
-    print("="*60)
+    print("=" * 60)
     load_model()
     HTTPServer(("127.0.0.1", 8189), CaptionHandler).serve_forever()

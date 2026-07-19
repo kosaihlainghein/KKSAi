@@ -5,8 +5,6 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-// ─── Database types ───────────────────────────────────────────────────────────
-
 export interface DbProject {
   id: string;
   name: string;
@@ -73,7 +71,6 @@ export interface DbModelCheckpoint {
   created_at: string;
 }
 
-// Stable session ID for this browser session
 export const SESSION_ID = (() => {
   const key = 'kks_chat_session';
   let id = sessionStorage.getItem(key);
